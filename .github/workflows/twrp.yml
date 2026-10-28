@@ -224,6 +224,19 @@ jobs:
             fi
             echo "[fix] removed hal_hwcrypto_default.te and its file_contexts entry"
           fi
+          # ramdisk 打包用 rsync 把 out/<dev>/root 同步到 recovery，
+          # 而 root/odm/{bin,etc,firmware,lib64} 是指向分区挂载点的 symlink；
+          # 设备树用 PRODUCT_COPY_FILES 把 prebuilt/odm 装到 recovery/root/odm，
+          # 目标目录非空，rsync 无法用 symlink 覆盖，报
+          #   could not make way for new symlink / cannot delete non-empty directory
+          # Makefile 里的 recovery_root_overlay_paths 只清理源码树 recovery/root 下的
+          # overlay，覆盖不到 PRODUCT_COPY_FILES，所以给 rsync 加排除，
+          # 让 recovery/root/odm 保留 prebuilt 的实体文件（/odm/... 仍可访问）。
+          MK="$SRC_ROOT/build/make/core/Makefile"
+          if [ -f "$MK" ] && ! grep -q -- '--exclude=/odm' "$MK"; then
+            sed -i 's|rsync -a --exclude=sdcard |rsync -a --exclude=/odm --exclude=sdcard |' "$MK"
+            echo "[fix] excluded /odm from recovery ramdisk rsync"
+          fi
           if [ -f "$DEVICE_DIR/device.mk" ]; then
             cd "$DEVICE_DIR"
             # AOSP16 的 prebuilts/module_sdk/CrashRecovery 要求 product 显式声明
