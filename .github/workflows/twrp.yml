@@ -201,6 +201,12 @@ jobs:
                 echo "[fix] declared ${attr}"
               fi
             done
+            # hal_attribute_service(hal_hwcrypto, hal_hwcrypto_service) 需要该 type，
+            # 它同样被 public/private service.te 的 202504 board API 分支包住而未展开。
+            if ! grep -q '^type hal_hwcrypto_service' "$HWC"; then
+              sed -i '1i type hal_hwcrypto_service, protected_service, hal_service_type, service_manager_type;' "$HWC"
+              echo "[fix] declared hal_hwcrypto_service"
+            fi
             sed -i -E 's|^(binder_call\(hal_hwcrypto_client, hal_hwcrypto_server\);)|# \1|' "$HWC"
             echo "[fix] patched hal_hwcrypto_default.te"
             head -4 "$HWC"
