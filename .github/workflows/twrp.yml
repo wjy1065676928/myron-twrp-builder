@@ -50,6 +50,7 @@ jobs:
       SRC_ROOT: ${{ github.workspace }}/src
       TREE_ROOT: ${{ github.workspace }}/device-tree
       OUT_DIR: ${{ github.workspace }}/src/out
+      CCACHE_DIR: ${{ github.workspace }}/ccache
 
       # TWRP manifest configuration (preferred when present)
       TWRP_MANIFEST: ${{ matrix.CONFIG.TWRP.Manifest }}
@@ -102,7 +103,7 @@ jobs:
             git-core gnupg flex bison build-essential zip unzip curl \
             zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
             libncurses-dev libx11-dev libgl1-mesa-dev libxml2-utils \
-            xsltproc fontconfig python3 python3-pip bc rsync \
+            xsltproc fontconfig python3 python3-pip bc rsync ccache \
             libssl-dev lz4 zstd || true
           if ! command -v repo >/dev/null 2>&1; then
             sudo curl -fsSL --max-time 180 --retry 3 \
@@ -112,8 +113,26 @@ jobs:
           git config --global user.name "${{ github.actor }}"
           git config --global user.email "${{ github.actor }}@users.noreply.github.com"
           git config --global --add safe.directory '*'
+          # ccache 上限控制在 3G，避免挤占 GitHub 仓库 10G 的缓存总额
+          ccache -M 3G
+          ccache -z >/dev/null 2>&1 || true
           repo --version 2>&1 | head -2
           df -h /
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          # 三部分各自收益：
+          #   ccache        -> C/C++ 对象复用，命中率最高，省 30-50 分钟
+          #   out/soong     -> soong 模块图，跳过 8-10 分钟分析和 24G 内存峰值
+          #   out/host      -> 宿主工具（go/rust/clang），省 15 分钟左右
+          path: |
+            ${{ env.CCACHE_DIR }}
+            ${{ env.SRC_ROOT }}/out/soong
+            ${{ env.SRC_ROOT }}/out/host
+          key: twrp-${{ env.DEVICE_NAME }}-${{ github.sha }}
+          restore-keys: |
+            twrp-${{ env.DEVICE_NAME }}-
 
       - name: ♊ Sync source
         timeout-minutes: 60
@@ -231,6 +250,13 @@ jobs:
           df -h "$SRC_ROOT" || true
           # 内存吃紧时更积极地换出，降低 OOM killer 直接杀进程的概率
           sudo sysctl -w vm.swappiness=100 >/dev/null 2>&1 || true
+          # 启用 ccache：命中后可跳过大量重复的 C/C++ 编译
+          export USE_CCACHE=1
+          export CCACHE_EXEC=$(command -v ccache)
+          export CCACHE_DIR="$CCACHE_DIR"
+          # 时间戳变化不应导致缓存失效（缓存跨 run 恢复时 mtime 必然不同）
+          export CCACHE_SLOPPINESS="include_file_ctime,include_file_mtime,time_macros"
+          ccache -s 2>/dev/null | head -8 || true
           source build/envsetup.sh
           export ALLOW_MISSING_DEPENDENCIES=true
           # TWRP-Test 改过 frameworks/native 等系统库，libbinder_ndk 等模块的 ABI
@@ -260,6 +286,8 @@ jobs:
           m ${DEVICE_BOOT_PARTITION}image -j4
           RET=$?
           kill $TIP_PID 2>/dev/null
+          echo "=== ccache stats ==="
+          ccache -s 2>/dev/null | head -12 || true
           if [ $RET -ne 0 ]; then
             echo "=== kernel OOM / shutdown messages ==="
             sudo dmesg 2>/dev/null | tail -30 || true
