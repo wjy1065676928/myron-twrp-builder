@@ -257,6 +257,37 @@ jobs:
             fi
             grep -nE 'PRODUCT_SHIPPING_API_LEVEL|PRODUCT_APEX_SYSTEM_SERVER_JARS' device.mk || true
           fi
+          # ---- 应用两个与 UI 体系无关的源码补丁（来自 MissMyTime/patches/common）----
+          # 1) system/vold/Weaver1.cpp：Android 16 上 Weaver HAL 起得比 vold 晚，
+          #    首次 getConfig 返回 isOk 但 keySize/valueSize 为 0，导致 FBE 解密失败。
+          #    补丁改为 80 次 × 250ms（20 秒）重试，且要求配置非空才算成功。
+          # 2) system/extras/partition_tools/Android.bp：lpmake/lpadd 由 cc_binary_host
+          #    改为 cc_binary + host_supported，使 recovery（target 侧）内也能操作动态分区。
+          PB="https://raw.githubusercontent.com/MissMyTime/twrp_device_sm8850/main/patches/common/patches"
+          apply_patch() {
+            local dir="$1" pf="$2" name="$3"
+            cd "$dir" || return 1
+            if patch -p1 -l --forward --dry-run < "$pf" >/dev/null 2>&1; then
+              patch -p1 -l --forward < "$pf" >/dev/null && echo "[fix] applied $name"
+            elif patch -p1 -l -R --dry-run < "$pf" >/dev/null 2>&1; then
+              echo "[ok] $name already applied"
+            else
+              echo "::error::$name cannot be applied (context mismatch)"; return 1
+            fi
+          }
+          if curl -fsSL --max-time 90 "$PB/system_vold/system_vold.patch" -o /tmp/vold.patch; then
+            apply_patch "$SRC_ROOT/system/vold" /tmp/vold.patch "vold Weaver retry" || exit 1
+          else
+            echo "::error::download vold patch failed"; exit 1
+          fi
+          if curl -fsSL --max-time 90 "$PB/system_extras/partition_tools_target_build.patch" -o /tmp/lp.patch; then
+            apply_patch "$SRC_ROOT/system/extras" /tmp/lp.patch "partition_tools host+target" || exit 1
+          else
+            echo "::error::download lptools patch failed"; exit 1
+          fi
+          grep -c 'attempt < 80' "$SRC_ROOT/system/vold/Weaver1.cpp" || true
+          grep -c 'host_supported: true' "$SRC_ROOT/system/extras/partition_tools/Android.bp" || true
+          cd "$SRC_ROOT"
           if [ -n "$DEVICE_PATCH_SCRIPT" ] && [ -f "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" ]; then
             cd "$SRC_ROOT"
             bash "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" "$SRC_ROOT" "$DEVICE_NAME"
