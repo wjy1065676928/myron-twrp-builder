@@ -133,6 +133,10 @@ jobs:
           key: twrp-${{ env.DEVICE_NAME }}-${{ github.sha }}
           restore-keys: |
             twrp-${{ env.DEVICE_NAME }}-
+          # 默认 save-always=false：job 一失败就完全不写缓存。
+          # 我们的构建经常在最后阶段报错，而前面几十分钟的编译成果应当保留，
+          # 否则每轮都从零开始，越调越慢。
+          save-always: true
 
       - name: ♊ Sync source
         timeout-minutes: 60
