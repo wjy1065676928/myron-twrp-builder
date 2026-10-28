@@ -1,0 +1,18 @@
+[
+    {
+        "TWRP": {
+            "Manifest": "https://github.com/TWRP-Test/platform_manifest_twrp_aosp.git",
+            "Branch": "twrp-16.0"
+        },
+        "Device": {
+            "Repo": "https://github.com/MissMyTime/twrp_device_sm8850",
+            "Branch": "main",
+            "Location": "device/xiaomi/myron",
+            "SourceLocation": "device/xiaomi/myron",
+            "DeviceName": "myron",
+            "Makefile": "twrp_myron",
+            "BootPartition": "recovery",
+            "PatchScript": ""
+        }
+    }
+]

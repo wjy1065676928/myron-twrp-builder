@@ -1,0 +1,295 @@
+name: Build TWRPs
+
+on:
+  push:
+    paths:
+      - ".github/workflows/twrp.yml"
+      - "TWRP/configs/*.config.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  Read-configuration:
+    name: ®️ Parse *.config.json
+    runs-on: ubuntu-latest
+    outputs:
+      CONFIGS: ${{ steps.generate-matrix.outputs.CONFIGS }}
+      BUILD_DATE: ${{ steps.generate-builddate.outputs.BUILDDATE }}
+    steps:
+      - name: 🔴 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🟠 Generate Matrix
+        id: generate-matrix
+        run: |
+          echo "CONFIGS<<EOF" >> $GITHUB_OUTPUT
+          jq -s '[.[][]]' TWRP/configs/*.config.json >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: 🟡 Set builddate
+        id: generate-builddate
+        run: echo "BUILDDATE=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+  Build-TWRP:
+    name: ©️ Build ${{ matrix.CONFIG.Device.DeviceName }}
+    runs-on: ubuntu-latest
+    needs:
+      - Read-configuration
+    strategy:
+      max-parallel: 2
+      fail-fast: false
+      matrix:
+        CONFIG: ${{ fromJSON(needs.Read-configuration.outputs.CONFIGS) }}
+    env:
+      WORKSPACE: ${{ github.workspace }}
+      BUILD_DATE: ${{ needs.Read-configuration.outputs.BUILD_DATE }}
+
+      # Source layout
+      SRC_ROOT: ${{ github.workspace }}/src
+      TREE_ROOT: ${{ github.workspace }}/device-tree
+      OUT_DIR: ${{ github.workspace }}/src/out
+
+      # TWRP manifest configuration (preferred when present)
+      TWRP_MANIFEST: ${{ matrix.CONFIG.TWRP.Manifest }}
+      TWRP_BRANCH: ${{ matrix.CONFIG.TWRP.Branch }}
+
+      # OrangeFox sync configuration (fallback)
+      OF_SYNC_REPO: ${{ matrix.CONFIG.OrangeFox.Repo }}
+      OF_SYNC_BRANCH: ${{ matrix.CONFIG.OrangeFox.Branch }}
+
+      # Device tree configuration
+      DEVICE_REPO: ${{ matrix.CONFIG.Device.Repo }}
+      DEVICE_BRANCH: ${{ matrix.CONFIG.Device.Branch }}
+      DEVICE_LOCATION: ${{ matrix.CONFIG.Device.Location }}
+      DEVICE_SOURCE_LOCATION: ${{ matrix.CONFIG.Device.SourceLocation }}
+      DEVICE_NAME: ${{ matrix.CONFIG.Device.DeviceName }}
+      DEVICE_MAKEFILE: ${{ matrix.CONFIG.Device.Makefile }}
+      DEVICE_BOOT_PARTITION: ${{ matrix.CONFIG.Device.BootPartition }}
+      DEVICE_PATCH_SCRIPT: ${{ matrix.CONFIG.Device.PatchScript }}
+    steps:
+      - name: ♈ Free disk space and add swap
+        run: |
+          # 不切 LVM build 卷：maximize-build-space 会把 root 压到只剩几百 KB，
+          # 导致 apt-get update 写 /var/lib/apt/lists 时报 No space left on device。
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo apt-get clean || true
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
+          # AOSP16 的 soong_build 加载全量模块图峰值 >24G，16G RAM 必须配大 swap；
+          # 磁盘靠后面的 Reclaim disk 步骤删 .repo/.git 腾出来
+          sudo fallocate -l 16G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384 status=none
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile >/dev/null
+          sudo swapon /swapfile
+          free -h
+          df -h /
+
+      - name: ♉ Prepare the build environment
+        timeout-minutes: 25
+        run: |
+          # Ubuntu 24.04 的 needrestart 会在 apt 结束后弹交互菜单，非 TTY 环境下会一直挂住
+          export DEBIAN_FRONTEND=noninteractive
+          export NEEDRESTART_MODE=a
+          export NEEDRESTART_SUSPEND=1
+          sudo -E apt-get update -y
+          sudo -E apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::=--force-confdef \
+            -o Dpkg::Options::=--force-confold \
+            -o Acquire::Retries=3 \
+            git-core gnupg flex bison build-essential zip unzip curl \
+            zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
+            libncurses-dev libx11-dev libgl1-mesa-dev libxml2-utils \
+            xsltproc fontconfig python3 python3-pip bc rsync \
+            libssl-dev lz4 zstd || true
+          if ! command -v repo >/dev/null 2>&1; then
+            sudo curl -fsSL --max-time 180 --retry 3 \
+              https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+            sudo chmod a+x /usr/local/bin/repo
+          fi
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          git config --global --add safe.directory '*'
+          repo --version 2>&1 | head -2
+          df -h /
+
+      - name: ♊ Sync source
+        timeout-minutes: 60
+        run: |
+          mkdir -p "$SRC_ROOT"
+          cd "$SRC_ROOT"
+          if [ -n "$TWRP_MANIFEST" ]; then
+            echo "==> TWRP manifest: $TWRP_MANIFEST ($TWRP_BRANCH)"
+            repo init -u "$TWRP_MANIFEST" -b "$TWRP_BRANCH" --depth=1
+            (while true; do echo "Syncing source... $(df -h / | tail -1)"; sleep 120; done) &
+            TIP_PID=$!
+            # sync 是网络 IO 密集型，并发数与 CPU 核数无关；
+            # 4 并发需要 20 分钟，拉到 16 可显著缩短，减少免费 runner 被抢占的窗口。
+            repo sync -c --no-tags --no-clone-bundle --force-sync -j16
+            kill $TIP_PID 2>/dev/null || true
+          else
+            echo "==> OrangeFox sync: $OF_SYNC_REPO ($OF_SYNC_BRANCH)"
+            git clone --depth=1 "$OF_SYNC_REPO" "$WORKSPACE/of-sync"
+            cd "$WORKSPACE/of-sync"
+            ./orangefox_sync.sh --branch "$OF_SYNC_BRANCH" --path "$SRC_ROOT"
+          fi
+          df -h "$SRC_ROOT" /
+
+      - name: ♋ Place device trees and kernel
+        run: |
+          if [ -n "$TWRP_MANIFEST" ]; then
+            rm -rf "$TREE_ROOT"
+            git clone --depth=1 -b "$DEVICE_BRANCH" "$DEVICE_REPO" "$TREE_ROOT"
+            SRC_SUB="${DEVICE_SOURCE_LOCATION:-$DEVICE_LOCATION}"
+            mkdir -p "$SRC_ROOT/$DEVICE_LOCATION"
+            rsync -a --delete "$TREE_ROOT/$SRC_SUB/" "$SRC_ROOT/$DEVICE_LOCATION/"
+            ls -l "$SRC_ROOT/$DEVICE_LOCATION" | head -30
+          else
+            mkdir -p "$SRC_ROOT/$(dirname "$DEVICE_LOCATION")"
+            git clone --recursive --depth=1 -j$(nproc) --branch "$DEVICE_BRANCH" \
+              "$DEVICE_REPO" "$SRC_ROOT/$DEVICE_LOCATION"
+          fi
+
+      - name: ♌ Reclaim disk (drop VCS metadata)
+        run: |
+          cd "$SRC_ROOT"
+          echo "free before: $(df -h / | awk 'NR==2{print $4}')"
+          du -sh .repo 2>/dev/null || true
+          # 编译只需要 worktree 里的文件，AOSP 官方也支持从 tarball（无 .git）构建。
+          # .repo 占 25-30G，删掉换给 swap 和 out。
+          rm -rf .repo
+          find . -name .git -prune -exec rm -rf {} + 2>/dev/null || true
+          echo "free after:  $(df -h / | awk 'NR==2{print $4}')"
+          df -h /
+
+      - name: ♍ Adapt device tree
+        run: |
+          DEVICE_DIR="$SRC_ROOT/$DEVICE_LOCATION"
+          if [ -f "$DEVICE_DIR/BoardConfig.mk" ]; then
+            cd "$DEVICE_DIR"
+            # AOSP16 的 sepolicy 属性按 board API 分支声明，例如：
+            #   public/attributes : starting_at_board_api(202504, `hal_attribute(hwcrypto);')
+            #   private/attributes: until_board_api(202504,    `hal_attribute(hwcrypto);')
+            # 该树写的是 BOARD_SHIPPING_API_LEVEL := 36（整数 SDK 形式），
+            # 落到两个分支之外，导致 hal_hwcrypto_server 未声明、vendor_sepolicy 编译失败。
+            # 与 TWRP-Test 的 sm8850 树保持一致，改用 YYYYMM 形式的 202504。
+            if grep -q '^BOARD_SHIPPING_API_LEVEL := 36' BoardConfig.mk; then
+              sed -i 's/^BOARD_SHIPPING_API_LEVEL := 36/BOARD_SHIPPING_API_LEVEL := 202504/' BoardConfig.mk
+              echo "[fix] BOARD_SHIPPING_API_LEVEL 36 -> 202504"
+            elif ! grep -q '^BOARD_SHIPPING_API_LEVEL' BoardConfig.mk; then
+              printf '\nBOARD_SHIPPING_API_LEVEL := 202504\n' >> BoardConfig.mk
+              echo "[fix] added BOARD_SHIPPING_API_LEVEL := 202504"
+            fi
+            grep -nE 'BOARD_SHIPPING_API_LEVEL' BoardConfig.mk || true
+          fi
+          # TWRP-Test 新增的 vendor/hal_hwcrypto_default.te 依赖 hal_hwcrypto_client/server 属性，
+          # 而这两个属性由 hal_attribute(hwcrypto) 在 public/private attributes 中按 board API
+          # 分支声明（starting_at/until 202504 互斥），当前 ap2a release 下两处都没展开。
+          # recovery 不跑 hwcrypto HAL，注释掉相关 binder 策略即可，保留域与 allow 规则。
+          HWC="$SRC_ROOT/system/sepolicy/vendor/hal_hwcrypto_default.te"
+          if [ -f "$HWC" ]; then
+            sed -i -E 's|^(binder_call\(hal_hwcrypto_client, hal_hwcrypto_server\);)|# \1|' "$HWC"
+            sed -i -E 's|^(hal_attribute_service\(hal_hwcrypto, hal_hwcrypto_service\);)|# \1|' "$HWC"
+            sed -i -E 's|^(binder_use\(hal_hwcrypto_server\);)|# \1|' "$HWC"
+            echo "[fix] relaxed hal_hwcrypto_default.te binder policy"
+            tail -5 "$HWC"
+          fi
+          if [ -f "$DEVICE_DIR/device.mk" ]; then
+            cd "$DEVICE_DIR"
+            # AOSP16 的 prebuilts/module_sdk/CrashRecovery 要求 product 显式声明
+            # com.android.crashrecovery:service-crashrecovery，否则 soong 生成 ninja 时：
+            #   [service-crashrecovery] in contents must also be declared in PRODUCT_APEX_SYSTEM_SERVER_JARS
+            if ! grep -q 'com.android.crashrecovery:service-crashrecovery' device.mk; then
+              printf '\n# ___ Soong fix: CrashRecovery APEX system server jar (AOSP16)\nPRODUCT_APEX_SYSTEM_SERVER_JARS += com.android.crashrecovery:service-crashrecovery\n' >> device.mk
+              echo "[fix] added PRODUCT_APEX_SYSTEM_SERVER_JARS for CrashRecovery"
+            else
+              echo "[ok] CrashRecovery APEX jar already declared"
+            fi
+            grep -nE 'PRODUCT_SHIPPING_API_LEVEL|PRODUCT_APEX_SYSTEM_SERVER_JARS' device.mk || true
+          fi
+          if [ -n "$DEVICE_PATCH_SCRIPT" ] && [ -f "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" ]; then
+            cd "$SRC_ROOT"
+            bash "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" "$SRC_ROOT" "$DEVICE_NAME"
+          else
+            echo "No patch script for $DEVICE_NAME, skipping."
+          fi
+
+      - name: ♎ Build it
+        timeout-minutes: 330
+        working-directory: ${{ env.SRC_ROOT }}
+        run: |
+          set +e
+          df -h "$SRC_ROOT" || true
+          # 内存吃紧时更积极地换出，降低 OOM killer 直接杀进程的概率
+          sudo sysctl -w vm.swappiness=100 >/dev/null 2>&1 || true
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          # TWRP-Test 改过 frameworks/native 等系统库，libbinder_ndk 等模块的 ABI
+          # 与 prebuilts/abi-dumps 里的官方 dump 不符，会触发 header-abi-diff 失败。
+          # AOSP 官方提供该开关跳过 ABI 兼容性校验。
+          export SKIP_ABI_CHECKS=true
+          SELECTED=""
+          for variant in "${DEVICE_MAKEFILE}-ap2a-eng" "${DEVICE_MAKEFILE}-bp2a-eng" "${DEVICE_MAKEFILE}-ap1a-eng" "${DEVICE_MAKEFILE}-eng" "${DEVICE_MAKEFILE}-userdebug"; do
+            echo "==> Trying lunch $variant"
+            TARGET_PRODUCT=""
+            lunch "$variant"
+            if [ -n "$TARGET_PRODUCT" ]; then
+              SELECTED="$variant"
+              echo "==> lunch OK: $SELECTED"
+              break
+            fi
+          done
+          if [ -z "$SELECTED" ]; then
+            echo "ERROR: no usable lunch target for $DEVICE_MAKEFILE"
+            exit 1
+          fi
+          (while true; do echo "$(date +%T) building ${DEVICE_BOOT_PARTITION}image..."; free -h; df -h / | tail -1; sleep 120; done) &
+          TIP_PID=$!
+          # 16GB runner 用默认并行度会在 ninja 阶段触发 OOM（runner 收到 terminated 信号后被回收），
+          # 但 soong 分析过后内存会释放大半（实测 swap 仅用 742Mi），-j4 可用。
+          # -j2 时实测约 100 目标/分钟，25273 个目标会贴近 6 小时上限，-j4 留出余量。
+          m ${DEVICE_BOOT_PARTITION}image -j4
+          RET=$?
+          kill $TIP_PID 2>/dev/null
+          if [ $RET -ne 0 ]; then
+            echo "=== kernel OOM / shutdown messages ==="
+            sudo dmesg 2>/dev/null | tail -30 || true
+            free -h || true
+            df -h / || true
+          fi
+          exit $RET
+
+      - name: ♏ Take the build
+        if: always()
+        run: |
+          OUT="$OUT_DIR/target/product/$DEVICE_NAME"
+          echo "==> Output: $OUT"
+          ls -lh "$OUT"/*.img 2>/dev/null || true
+          if [ -f "$OUT/recovery.img" ]; then
+            cp "$OUT/recovery.img" "$OUT/recovery-$DEVICE_NAME-$BUILD_DATE.img"
+            ls -lh "$OUT/recovery-$DEVICE_NAME-$BUILD_DATE.img"
+          fi
+          df -h / || true
+
+      - name: ♐ Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ env.OUT_DIR }}/target/product/${{ env.DEVICE_NAME }}/recovery*.img
+
+      - name: ♑ Create GitHub Release
+        if: success()
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.BUILD_DATE }}.${{ github.run_number }}
+          name: ${{ env.DEVICE_NAME }}-${{ env.BUILD_DATE }}
+          files: |
+            ${{ env.OUT_DIR }}/target/product/${{ env.DEVICE_NAME }}/recovery*.img
+          generate_release_notes: true
