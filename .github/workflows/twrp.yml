@@ -203,20 +203,6 @@ jobs:
             fi
             echo "[fix] removed hal_hwcrypto_default.te and its file_contexts entry"
           fi
-            done
-            # hal_attribute_service(hal_hwcrypto, hal_hwcrypto_service) 依赖
-            # hal_hwcrypto_service 这个 type；该 type 在 vendor_sepolicy 里缺失、
-            # 在 recovery_sepolicy 里却已存在，补声明会导致 recovery 侧重复声明。
-            # 所以不补 type，直接注释掉唯一使用它的这一行。
-            if ! grep -q '^# hal_attribute_service(hal_hwcrypto' "$HWC"; then
-              sed -i -E 's|^(hal_attribute_service\(hal_hwcrypto, hal_hwcrypto_service\);)|# \1|' "$HWC"
-              echo "[fix] commented hal_attribute_service (hwcrypto)"
-            fi
-            sed -i -E 's|^(binder_call\(hal_hwcrypto_client, hal_hwcrypto_server\);)|# \1|' "$HWC"
-            sed -i -E 's|^(binder_call\(hal_hwcrypto_client, hal_hwcrypto_server\);)|# \1|' "$HWC"
-            echo "[fix] patched hal_hwcrypto_default.te"
-            head -4 "$HWC"
-          fi
           if [ -f "$DEVICE_DIR/device.mk" ]; then
             cd "$DEVICE_DIR"
             # AOSP16 的 prebuilts/module_sdk/CrashRecovery 要求 product 显式声明
