@@ -190,16 +190,19 @@ jobs:
           # recovery 不跑 hwcrypto HAL，注释掉相关 binder 策略即可，保留域与 allow 规则。
           HWC="$SRC_ROOT/system/sepolicy/vendor/hal_hwcrypto_default.te"
           if [ -f "$HWC" ]; then
-            # hal_attribute(hwcrypto) 在 ap2a release 下两个 board API 分支
-            # （starting_at / until 202504）都未展开，三个属性全部缺失。
-            # 而 hal_server_domain 展开后依次引用 hal_hwcrypto 与 hal_hwcrypto_server，
-            # binder_use/binder_call 还引用 client，必须一次性补齐。
-            # SELinux 顺序解析，声明要插在文件首行。
-            for attr in hal_hwcrypto hal_hwcrypto_client hal_hwcrypto_server; do
-              if ! grep -q "^attribute ${attr};" "$HWC"; then
-                sed -i "1i attribute ${attr};" "$HWC"
-                echo "[fix] declared ${attr}"
-              fi
+            # 该文件引用的 hal_hwcrypto / _client / _server 属性与 hal_hwcrypto_service 类型，
+            # 在 TWRP-Test 里全部挂在 202504 board API 分支上，ap2a release 下未展开：
+            #   vendor policy   -> 属性缺失，checkpolicy 编译失败
+            #   recovery policy -> 已含这些声明，补声明会 Duplicate declaration
+            # 两边矛盾无法通过补声明解决。该域只服务 trusty hwcrypto HAL（recovery 不跑），
+            # 且 vendor 侧仅 file_contexts 一行引用它，直接整体移出构建。
+            rm -f "$HWC"
+            FC="$SRC_ROOT/system/sepolicy/vendor/file_contexts"
+            if [ -f "$FC" ]; then
+              sed -i '/hwcrypto/d' "$FC"
+            fi
+            echo "[fix] removed hal_hwcrypto_default.te and its file_contexts entry"
+          fi
             done
             # hal_attribute_service(hal_hwcrypto, hal_hwcrypto_service) 依赖
             # hal_hwcrypto_service 这个 type；该 type 在 vendor_sepolicy 里缺失、
