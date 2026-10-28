@@ -190,19 +190,20 @@ jobs:
           # recovery 不跑 hwcrypto HAL，注释掉相关 binder 策略即可，保留域与 allow 规则。
           HWC="$SRC_ROOT/system/sepolicy/vendor/hal_hwcrypto_default.te"
           if [ -f "$HWC" ]; then
-            # hal_server_domain(hal_hwcrypto_default, hal_hwcrypto) 会展开出
-            #   typeattribute hal_hwcrypto_default hal_hwcrypto;
-            #   typeattribute hal_hwcrypto_default hal_hwcrypto_server;   <-- 需要该属性存在
-            # 而 hal_attribute(hwcrypto) 在 ap2a 下两个 board API 分支都没展开，
-            # 所以直接在文件首行补声明（SELinux 按顺序解析，必须在引用之前）。
-            if ! grep -q '^attribute hal_hwcrypto_server;' "$HWC"; then
-              sed -i '1i attribute hal_hwcrypto_server;' "$HWC"
-              echo "[fix] declared hal_hwcrypto_server"
-            fi
+            # hal_attribute(hwcrypto) 在 ap2a release 下两个 board API 分支
+            # （starting_at / until 202504）都未展开，三个属性全部缺失。
+            # 而 hal_server_domain 展开后依次引用 hal_hwcrypto 与 hal_hwcrypto_server，
+            # binder_use/binder_call 还引用 client，必须一次性补齐。
+            # SELinux 顺序解析，声明要插在文件首行。
+            for attr in hal_hwcrypto hal_hwcrypto_client hal_hwcrypto_server; do
+              if ! grep -q "^attribute ${attr};" "$HWC"; then
+                sed -i "1i attribute ${attr};" "$HWC"
+                echo "[fix] declared ${attr}"
+              fi
+            done
             sed -i -E 's|^(binder_call\(hal_hwcrypto_client, hal_hwcrypto_server\);)|# \1|' "$HWC"
-            sed -i -E 's|^(binder_use\(hal_hwcrypto_server\);)|# \1|' "$HWC"
             echo "[fix] patched hal_hwcrypto_default.te"
-            head -3 "$HWC"
+            head -4 "$HWC"
           fi
           if [ -f "$DEVICE_DIR/device.mk" ]; then
             cd "$DEVICE_DIR"
