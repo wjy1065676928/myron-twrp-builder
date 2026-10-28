@@ -148,10 +148,20 @@ jobs:
             repo init -u "$TWRP_MANIFEST" -b "$TWRP_BRANCH" --depth=1
             (while true; do echo "Syncing source... $(df -h / | tail -1)"; sleep 120; done) &
             TIP_PID=$!
-            # sync 是网络 IO 密集型，并发数与 CPU 核数无关；
-            # 4 并发需要 20 分钟，拉到 16 可显著缩短，减少免费 runner 被抢占的窗口。
-            repo sync -c --no-tags --no-clone-bundle --force-sync -j16
+            # sync 是网络 IO 密集型，但 googlesource 对高并发会返回 502
+            # （实测 -j16 出现 15 个 project fetch 失败），降到 8 并加自动重试。
+            SYNC_OK=0
+            for attempt in 1 2 3; do
+              if repo sync -c --no-tags --no-clone-bundle --force-sync -j8; then
+                SYNC_OK=1; break
+              fi
+              echo "::warning::repo sync attempt $attempt failed, retrying in 15s"
+              sleep 15
+            done
             kill $TIP_PID 2>/dev/null || true
+            if [ "$SYNC_OK" != "1" ]; then
+              echo "::error::repo sync failed after 3 attempts"; exit 1
+            fi
           else
             echo "==> OrangeFox sync: $OF_SYNC_REPO ($OF_SYNC_BRANCH)"
             git clone --depth=1 "$OF_SYNC_REPO" "$WORKSPACE/of-sync"
