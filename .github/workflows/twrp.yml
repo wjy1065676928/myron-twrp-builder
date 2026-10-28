@@ -237,9 +237,12 @@ jobs:
           # overlay，覆盖不到 PRODUCT_COPY_FILES，所以给 rsync 加排除，
           # 让 recovery/root/odm 保留 prebuilt 的实体文件（/odm/... 仍可访问）。
           MK="$SRC_ROOT/build/make/core/Makefile"
-          if [ -f "$MK" ] && ! grep -q -- '--exclude=/odm' "$MK"; then
-            sed -i 's|rsync -a --exclude=sdcard |rsync -a --exclude=/odm --exclude=sdcard |' "$MK"
-            echo "[fix] excluded /odm from recovery ramdisk rsync"
+          if [ -f "$MK" ] && ! grep -q -- '--exclude=/root/odm' "$MK"; then
+            # 注意锚点：该 rsync 的传输根是 root/ 的父目录，路径带 root/ 前缀，
+            # 现有排除项也是 --exclude=/root/sepolicy 这种写法。
+            # 写成 --exclude=/odm 不会生效。
+            sed -i 's|rsync -a --exclude=sdcard |rsync -a --exclude=/root/odm --exclude=sdcard |' "$MK"
+            echo "[fix] excluded /root/odm from recovery ramdisk rsync"
           fi
           if [ -f "$DEVICE_DIR/device.mk" ]; then
             cd "$DEVICE_DIR"
