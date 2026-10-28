@@ -191,15 +191,17 @@ jobs:
             # AOSP16 的 sepolicy 属性按 board API 分支声明，例如：
             #   public/attributes : starting_at_board_api(202504, `hal_attribute(hwcrypto);')
             #   private/attributes: until_board_api(202504,    `hal_attribute(hwcrypto);')
-            # 该树写的是 BOARD_SHIPPING_API_LEVEL := 36（整数 SDK 形式），
-            # 落到两个分支之外，导致 hal_hwcrypto_server 未声明、vendor_sepolicy 编译失败。
-            # 与 TWRP-Test 的 sm8850 树保持一致，改用 YYYYMM 形式的 202504。
-            if grep -q '^BOARD_SHIPPING_API_LEVEL := 36' BoardConfig.mk; then
-              sed -i 's/^BOARD_SHIPPING_API_LEVEL := 36/BOARD_SHIPPING_API_LEVEL := 202504/' BoardConfig.mk
-              echo "[fix] BOARD_SHIPPING_API_LEVEL 36 -> 202504"
-            elif ! grep -q '^BOARD_SHIPPING_API_LEVEL' BoardConfig.mk; then
-              printf '\nBOARD_SHIPPING_API_LEVEL := 202504\n' >> BoardConfig.mk
-              echo "[fix] added BOARD_SHIPPING_API_LEVEL := 202504"
+            # 该树写的是 BOARD_SHIPPING_API_LEVEL := 36（整数 SDK 形式）。
+            # 注意不能用 202504：ap2a release 的 RELEASE_BOARD_API_LEVEL 是 202404，
+            # build.prop 会校验 ro.board.api_level(202404) >= ro.board.first_api_level，
+            # 设成 202504 会直接报 "must not be less than"。
+            # 这里统一为 202404，与 release 对齐。
+            if grep -q '^BOARD_SHIPPING_API_LEVEL := ' BoardConfig.mk; then
+              sed -i 's/^BOARD_SHIPPING_API_LEVEL := .*/BOARD_SHIPPING_API_LEVEL := 202404/' BoardConfig.mk
+              echo "[fix] BOARD_SHIPPING_API_LEVEL -> 202404"
+            else
+              printf '\nBOARD_SHIPPING_API_LEVEL := 202404\n' >> BoardConfig.mk
+              echo "[fix] added BOARD_SHIPPING_API_LEVEL := 202404"
             fi
             grep -nE 'BOARD_SHIPPING_API_LEVEL' BoardConfig.mk || true
           fi
