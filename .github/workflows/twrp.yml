@@ -70,6 +70,11 @@ jobs:
       DEVICE_BOOT_PARTITION: ${{ matrix.CONFIG.Device.BootPartition }}
       DEVICE_PATCH_SCRIPT: ${{ matrix.CONFIG.Device.PatchScript }}
     steps:
+      # Build job 没有 checkout，导致 scripts/ 和 vintf/ 不存在（上一轮 exit 127）。
+      # 只检出本仓库的构建脚本，源码仍由 repo sync 独立拉取。
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
       - name: ♈ Free disk space and add swap
         run: |
           # 不切 LVM build 卷：maximize-build-space 会把 root 压到只剩几百 KB，
