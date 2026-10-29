@@ -303,6 +303,15 @@ jobs:
           '
           grep -n 'attempt < 80' system/vold/Weaver1.cpp || true
           grep -nB1 'host_supported: true' system/extras/partition_tools/Android.bp | head -10 || true
+          # ---- KeyMint 版本属性修正（FBE 解密关键）----
+          # 设备树 BoardConfig.mk 用 BOARD_RECOVERY_BUILD_PROP_VERSION_RELEASE /
+          # _SECURITY_PATCH 控制 recovery 的 prop.default，但那是 MissMyTime 自建 build
+          # 才有的变量，TWRP-Test 的 build 未实现（grep 0 处），设置被静默忽略。
+          # 结果 prop.default 落成 release=14 / sdk=34 / security_patch=2024-09-05，
+          # 而设备实际是 Android 17。KeyMint 见到远低于设备的补丁级别会请求密钥升级，
+          # recovery 又拒绝持久化升级后的 key blob，FBE 解密因此失败。
+          # 对照第三方 1.4：release=99.87.36 / sdk=36 / security_patch=2099-12-31。
+          bash "$WORKSPACE/scripts/patch_prop_versions.sh" "$SRC_ROOT"
           cd "$SRC_ROOT"
           if [ -n "$DEVICE_PATCH_SCRIPT" ] && [ -f "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" ]; then
             cd "$SRC_ROOT"
