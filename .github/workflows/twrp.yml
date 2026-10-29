@@ -312,6 +312,20 @@ jobs:
           # recovery 又拒绝持久化升级后的 key blob，FBE 解密因此失败。
           # 对照第三方 1.4：release=99.87.36 / sdk=36 / security_patch=2099-12-31。
           bash "$WORKSPACE/scripts/patch_prop_versions.sh" "$SRC_ROOT"
+
+          # ---- 补充 recovery 模式的 vintf manifest fragment（解密关键）----
+          # servicemanager 在 recovery 下用 VintfObjectRecovery，只读
+          # /system/etc/vintf/manifest.xml 并自动合并 /system/etc/vintf/manifest/*.xml。
+          # 设备树的 manifest.xml 里没有 KeyMint / Weaver / Gatekeeper 声明，导致：
+          #   vendor.keymint 注册失败 -> exit 1 -> 无限重启
+          #   keystore2 无法连接 KeyMint -> panic -> 崩溃循环
+          #   odm.weaver_nxp 无法保持运行 -> metadata 解密失败
+          # 新增 fragment 文件并加 copy 规则到 recovery/root。
+          DEVICE_DIR="$SRC_ROOT/$DEVICE_LOCATION"
+          mkdir -p "$DEVICE_DIR/prebuilt/system/etc/vintf/manifest"
+          cp "$WORKSPACE/vintf/android.hardware.security.keymint-qti.xml" \
+             "$DEVICE_DIR/prebuilt/system/etc/vintf/manifest/"
+          bash "$WORKSPACE/scripts/patch_device_mk.sh" "$DEVICE_DIR/device.mk"
           cd "$SRC_ROOT"
           if [ -n "$DEVICE_PATCH_SCRIPT" ] && [ -f "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" ]; then
             cd "$SRC_ROOT"
