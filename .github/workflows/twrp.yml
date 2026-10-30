@@ -331,6 +331,16 @@ jobs:
           cp "$WORKSPACE/vintf/android.hardware.security.keymint-qti.xml" \
              "$DEVICE_DIR/prebuilt/system/etc/vintf/manifest/"
           bash "$WORKSPACE/scripts/patch_device_mk.sh" "$DEVICE_DIR/device.mk"
+
+          # ---- 修复 mtp,adb 分支踢掉 ADB 的问题（解密后必现）----
+          # init.recovery.usb.rc 的 mtp,adb 分支只拆不建；重建 handler 第 122 行
+          # 要求 sys.usb.ffs.mtp.ready=1，但镜像里没有 mtp 守护进程，无任何代码置该值，
+          # 于是 UDC 被置 none 后永不重建，ADB 断开且不自愈。
+          # 修法：松开重建条件 + 追加 oneshot 兜底（8 秒未绑定则回退纯 adb）。
+          bash "$WORKSPACE/scripts/patch_usb_rc.sh" \
+               "$DEVICE_DIR/recovery/root/init.recovery.usb.rc"
+          install -D -m 0755 "$WORKSPACE/scripts/myron-mtp-adb-guard.sh" \
+                   "$DEVICE_DIR/recovery/root/system/bin/myron-mtp-adb-guard.sh"
           cd "$SRC_ROOT"
           if [ -n "$DEVICE_PATCH_SCRIPT" ] && [ -f "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" ]; then
             cd "$SRC_ROOT"
