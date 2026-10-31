@@ -15,7 +15,7 @@
    /* To enable MTP debug, use the twrp command line feature:
     * twrp set tw_mtp_debug 1
     */
-@@ -2671,6 +2663,108 @@
+@@ -2671,6 +2663,107 @@
      mtp_write_fd = mtppipe[1];
      DataManager::SetValue("tw_mtp_enabled", 1);
      AddAllMtpStorage();
@@ -36,12 +36,13 @@
 +        usleep(100000);
 +        mtp_ready = android::base::GetProperty("sys.usb.ffs.mtp.ready", "0");
 +      }
-+      // prop 未置但 configfs 的 ready 文件已是 1：帮它置上
 +      if (mtp_ready != "1") {
++        // prop 未置但 configfs 的 ready 文件已是 1：帮它置上
++        // （TWFunc::ReadFile 成功返 0，且会去掉换行）
 +        std::string ffs_ready;
-+        if (android::base::ReadFileToString(
-+                "/config/usb_gadget/g1/functions/ffs.mtp/ready", &ffs_ready) &&
-+            android::base::Trim(ffs_ready) == "1") {
++        if (TWFunc::ReadFile("/config/usb_gadget/g1/functions/ffs.mtp/ready",
++                             ffs_ready) == 0 &&
++            ffs_ready == "1") {
 +          LOGINFO("MTP FFS ready file is set; syncing sys.usb.ffs.mtp.ready\n");
 +          android::base::SetProperty("sys.usb.ffs.mtp.ready", "1");
 +          mtp_ready = "1";
@@ -93,9 +94,8 @@
 +      // 验证 UDC 真绑上；首绑常被控制器状态拖住，重试一次
 +      usleep(500000);
 +      std::string udc;
-+      bool bound =
-+          android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) &&
-+          !android::base::Trim(udc).empty() && android::base::Trim(udc) != "none";
++      bool bound = TWFunc::ReadFile("/config/usb_gadget/g1/UDC", udc) == 0 &&
++                   !udc.empty() && udc != "none";
 +      if (!bound) {
 +        LOGINFO("MTP: first composite bind dropped; retrying UDC bind after "
 +                "controller settles\n");
@@ -108,9 +108,8 @@
 +          return false;
 +        }
 +        usleep(500000);
-+        bound =
-+            android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) &&
-+            !android::base::Trim(udc).empty() && android::base::Trim(udc) != "none";
++        bound = TWFunc::ReadFile("/config/usb_gadget/g1/UDC", udc) == 0 &&
++                !udc.empty() && udc != "none";
 +        if (!bound) {
 +          LOGERR("MTP: delayed composite UDC bind did not persist; "
 +                 "restoring adb-only\n");
