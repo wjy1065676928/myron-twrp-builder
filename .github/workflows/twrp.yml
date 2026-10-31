@@ -332,16 +332,15 @@ jobs:
              "$DEVICE_DIR/prebuilt/system/etc/vintf/manifest/"
           bash "$WORKSPACE/scripts/patch_device_mk.sh" "$DEVICE_DIR/device.mk"
 
-          # ---- 修复 mtp,adb 分支踢掉 ADB 的问题（解密后必现）----
-          # init.recovery.usb.rc 的 mtp,adb 分支只拆不建；重建 handler 第 122 行
-          # 要求 sys.usb.ffs.mtp.ready=1，但镜像里没有 mtp 守护进程，无任何代码置该值，
-          # 于是 UDC 被置 none 后永不重建；且 init 的 rm 无 -f 会撞 File exists，
-          # write UDC 撞 busy，adbd 报 FUNCTIONFS_BIND timeout 死循环。
-          # 修法（复刻 MissMyTime）：init 完全不插手，交给 myron-usb-mtp.sh 按时序重建。
-          bash "$WORKSPACE/scripts/patch_usb_rc.sh" \
-               "$DEVICE_DIR/recovery/root/init.recovery.usb.rc"
-          install -D -m 0755 "$WORKSPACE/scripts/myron-usb-mtp.sh" \
-                   "$DEVICE_DIR/recovery/root/system/bin/myron-usb-mtp.sh"
+          # ---- 修复 MTP 切换踢掉 ADB 的问题（复刻 MissMyTime 的 C++ 方案）----
+          # 原 EnableMtp() 直接 setprop sys.usb.config=mtp,adb，命中 init.recovery.usb.rc
+          # 里「只拆不建」的分支：摘 UDC → rm f1/f2/f3（无 -f，撞 File exists）→
+          # 等恒为 0 的 ffs.mtp.ready → UDC 永不重建 → adbd 端点被 shutdown →
+          # FUNCTIONFS_BIND timeout 死循环 → ADB 永久失联。
+          # 修法：把切换挪到 ForkServer 之后、等端点 ready、用 init 不认识的
+          # twrp_mtp_adb 配置名让 init 放手，再自己按序重建双端点。
+          bash "$WORKSPACE/scripts/apply_mtp_composite.sh" \
+               "$SRC_ROOT/bootable/recovery" "$WORKSPACE/patches"
           cd "$SRC_ROOT"
           if [ -n "$DEVICE_PATCH_SCRIPT" ] && [ -f "$TREE_ROOT/$DEVICE_PATCH_SCRIPT" ]; then
             cd "$SRC_ROOT"

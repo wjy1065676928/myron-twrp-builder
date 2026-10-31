@@ -1,0 +1,126 @@
+--- a/partitionmanager.cpp
++++ b/partitionmanager.cpp
+@@ -2653,14 +2653,6 @@
+     return false;
+   }
+ 
+-  if (android::base::GetProperty("sys.usb.config", "") != "mtp,adb") {
+-    android::base::SetProperty("sys.usb.config", "none");
+-    const std::string vendor = android::base::GetProperty("usb.vendor", "18D1");
+-    const std::string product = android::base::GetProperty("usb.product.mtpadb", "4EE2");
+-    TWFunc::WriteToFile("/sys/class/android_usb/android0/idVendor", vendor);
+-    TWFunc::WriteToFile("/sys/class/android_usb/android0/idProduct", product);
+-    android::base::SetProperty("sys.usb.config", "mtp,adb");
+-  }
+   /* To enable MTP debug, use the twrp command line feature:
+    * twrp set tw_mtp_debug 1
+    */
+@@ -2671,6 +2663,108 @@
+     mtp_write_fd = mtppipe[1];
+     DataManager::SetValue("tw_mtp_enabled", 1);
+     AddAllMtpStorage();
++    // MYRON_MTP_COMPOSITE: 切到 configfs 的 mtp+adb 双端点。
++    //
++    // 必须在 ForkServer 之后——此时 MTP 子进程已打开 /dev/usb-ffs/mtp/ep0，
++    // 端点才 ready；提前绑会被内核拒绝（UDC 不可写）。
++    //
++    // setprop 用 twrp_mtp_adb：init.recovery.usb.rc 没有这个 handler，
++    // init 收到后无匹配动作、完全不碰 USB，避免执行那套
++    // 「摘 UDC → rm f1/f2/f3」的破坏性操作（其 rm 无 -f 会撞 File exists，
++    // 且会把 adbd 端点一起 shutdown，ADB 永不自愈）。
++    if (android::base::GetProperty("sys.usb.config", "") != "mtp,adb") {
++      // 等 MTP 端点就绪，最多 5 秒
++      std::string mtp_ready =
++          android::base::GetProperty("sys.usb.ffs.mtp.ready", "0");
++      for (int i = 0; i < 50 && mtp_ready != "1"; i++) {
++        usleep(100000);
++        mtp_ready = android::base::GetProperty("sys.usb.ffs.mtp.ready", "0");
++      }
++      // prop 未置但 configfs 的 ready 文件已是 1：帮它置上
++      if (mtp_ready != "1") {
++        std::string ffs_ready;
++        if (android::base::ReadFileToString(
++                "/config/usb_gadget/g1/functions/ffs.mtp/ready", &ffs_ready) &&
++            android::base::Trim(ffs_ready) == "1") {
++          LOGINFO("MTP FFS ready file is set; syncing sys.usb.ffs.mtp.ready\n");
++          android::base::SetProperty("sys.usb.ffs.mtp.ready", "1");
++          mtp_ready = "1";
++        } else {
++          LOGINFO("MTP FFS did not report ready before USB config switch\n");
++        }
++      }
++      // 端点始终未就绪：拒绝切复合模式，保住纯 adb
++      if (mtp_ready != "1") {
++        LOGERR("MTP: refusing composite switch because MTP FunctionFS is not ready\n");
++        DisableMtp();
++        return false;
++      }
++
++      const std::string controller =
++          android::base::GetProperty("sys.usb.controller", "a600000.dwc3");
++      const std::string vendor = android::base::GetProperty("usb.vendor", "0x2717");
++      const std::string product =
++          android::base::GetProperty("usb.product.mtpadb", "0xFF48");
++
++      // 顺序关键：解绑 UDC → rm -f 强制清理 → 重建两端点 → 再绑 UDC。
++      // rm 必须带 -f：init 的 rm 无 -f 会撞 File exists 而卡死流程。
++      std::string cmd =
++          "sh -c '"
++          "setprop sys.usb.config twrp_mtp_adb; "
++          "echo none > /config/usb_gadget/g1/UDC 2>/dev/null || true; "
++          "rm -f /config/usb_gadget/g1/configs/b.1/function0 "
++          "/config/usb_gadget/g1/configs/b.1/function1 "
++          "/config/usb_gadget/g1/configs/b.1/f1 "
++          "/config/usb_gadget/g1/configs/b.1/f2 "
++          "/config/usb_gadget/g1/configs/b.1/f3; "
++          "echo mtp_adb > /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration; "
++          "echo " + vendor + " > /config/usb_gadget/g1/idVendor; "
++          "echo " + product + " > /config/usb_gadget/g1/idProduct; "
++          "ln -s /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1; "
++          "ln -s /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2; "
++          "echo " + controller + " > /config/usb_gadget/g1/UDC; "
++          "setprop sys.usb.state mtp,adb; "
++          "setprop twrp.usb.mtp_configured 1"
++          "'";
++      LOGINFO("MTP: switching configfs to mtp+adb composite %s:%s on %s (mtp=f1,adb=f2)\n",
++              vendor.c_str(), product.c_str(), controller.c_str());
++      if (TWFunc::ExecCmd(cmd) != 0) {
++        LOGERR("MTP: failed to bind mtp+adb composite; restoring adb-only\n");
++        DisableMtp();
++        return false;
++      }
++
++      // 验证 UDC 真绑上；首绑常被控制器状态拖住，重试一次
++      usleep(500000);
++      std::string udc;
++      bool bound =
++          android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) &&
++          !android::base::Trim(udc).empty() && android::base::Trim(udc) != "none";
++      if (!bound) {
++        LOGINFO("MTP: first composite bind dropped; retrying UDC bind after "
++                "controller settles\n");
++        usleep(2500000);
++        const std::string retry =
++            "sh -c 'echo " + controller + " > /config/usb_gadget/g1/UDC'";
++        if (TWFunc::ExecCmd(retry) != 0) {
++          LOGERR("MTP: delayed composite UDC bind failed; restoring adb-only\n");
++          DisableMtp();
++          return false;
++        }
++        usleep(500000);
++        bound =
++            android::base::ReadFileToString("/config/usb_gadget/g1/UDC", &udc) &&
++            !android::base::Trim(udc).empty() && android::base::Trim(udc) != "none";
++        if (!bound) {
++          LOGERR("MTP: delayed composite UDC bind did not persist; "
++                 "restoring adb-only\n");
++          DisableMtp();
++          return false;
++        }
++        LOGINFO("MTP: delayed composite UDC bind succeeded on %s\n",
++                controller.c_str());
++      }
++    }
+     return true;
+   }
+   close(mtppipe[0]);
